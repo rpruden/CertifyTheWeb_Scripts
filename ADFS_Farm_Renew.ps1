@@ -15,13 +15,11 @@ Import-Module ADFS
 # propegate changes to all other nodes.
 
 ##Variables
-### Fill out the variables for all ADFS servers
 $adfsHostname = "adfs.company.com"
 $adfsServers = @(
     "srv1adfs1"
     "srv1adfs2"
 )
-### Fill out the variables for all ADFS Proxy servers
 $wapServers = @(
     "srv1wap1"
     "srv1wap2"
@@ -43,7 +41,6 @@ Function Certificate-Copy {
 Function Certificate-Import {
     param([string]$server, [string]$localPFX)
     $session = New-PSSession -computername "$server"
-    #$certName = "$certPath" + "$pfxName"
     Invoke-Command -Session $session -ScriptBlock {
         param([string]$localPFX)
         Import-PfxCertificate -filepath "$localPFX" -CertStoreLocation Cert:\LocalMachine\My
@@ -60,16 +57,62 @@ Function Check-ADFSHeirarchy {
         } -Args $server
     Remove-PsSession $session
 }
+Function ADFS-Service-Restart {
+    param([string]$server)
+    $session = New-PSSession -computername "$server"
+    Invoke-Command -Session $session -ScriptBlock {
+        param([string]$server)
+        Restart-Service adfssrv
+        } -Args $server
+    Remove-PsSession $session
+}
 
 Function ADFS-Certificate-Bind {
-    param($pfxThumbprint)
+    param($pfxThumbprint, [string]$server)
+    $session = New-PSSession -computername "$server"
     Set-AdfsSslCertificate -Thumbprint $pfxThumbprint
-    Restart-Service adfssrv
+    Invoke-Command -Session $session -ScriptBlock {
+        param($pfxThumbprint)
+        $taskName = "ADFSCertUpdate"
+        $taskApp = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        $taskArgsString = "-command Set-AdfsCertificate -CertificateType Service-Communications -Thumbprint $pfxThumbprint"
+        $taskArgs = "$taskArgsString"
+        $Action = New-ScheduledTaskAction -Execute $taskApp -Argument $taskArgs
+        $Option = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -WakeToRun
+        $user = "SYSTEM"
+        $scheduledTask = Get-ScheduledTask | Where-object {$_.TaskName -like "$taskName"}
+        if ($scheduledTask) {
+            Disable-ScheduledTask -TaskName $taskName
+            UnRegister-ScheduledTask -TaskName $taskName -Confirm:$false
+        }
+        Register-ScheduledTask -TaskName $taskName -Action $Action -user $user -Settings $Option -RunLevel Highest
+        Start-ScheduledTask -TaskName $taskName
+        Disable-ScheduledTask -TaskName $taskName
+    } -Args $pfxThumbprint
+    Remove-PsSession $session
 }
 Function WAP-Certificate-Bind {
-    param($pfxThumbprint)
-    #Set-WebApplicationProxySslCertificate -Thumbprint $thumbPrint
-    #Restart-Service adfssrv
+    param([string]$server, $pfxThumbprint)
+    $session = New-PSSession -computername "$server"
+    Invoke-Command -Session $session -ScriptBlock {
+        param($pfxThumbprint)
+        $taskName = "ADFSProxyCertRenew"
+        $taskApp = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        $taskArgsString = "-command Set-WebApplicationProxySslCertificate -Thumbprint $pfxThumbprint"
+        $taskArgs = "$taskArgsString"
+        $Action = New-ScheduledTaskAction -Execute $taskApp -Argument $taskArgs
+        $Option = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -WakeToRun
+        $user = "SYSTEM"
+        $scheduledTask = Get-ScheduledTask | Where-object {$_.TaskName -like "$taskName"}
+        if ($scheduledTask) {
+            Disable-ScheduledTask -TaskName $taskName
+            UnRegister-ScheduledTask -TaskName $taskName -Confirm:$false
+        }
+        Register-ScheduledTask -TaskName $taskName -Action $Action -user $user -Settings $Option -RunLevel Highest
+        Start-ScheduledTask -TaskName $taskName
+        Disable-ScheduledTask -TaskName $taskName
+    } -Args $pfxThumbprint
+    Remove-PsSession $session
 }
 
 ## Run script for ADFS Proxy Servers
@@ -78,8 +121,7 @@ foreach ($server in $wapServers) {
     $localPath = "C:\ProgramData\Certify\assets\$adfsHostname\"
     $localPFX = "$localPath" + "$pfxName"
     Certificate-Copy $pfxFile $remoteDestinationPath
-    Certificate-Import $server $localPFX
-    WAP-Certificate-Bind $pfxThumbprint
+    WAP-Certificate-Bind $server $pfxThumbprint
 }
 
 ## Run script for ADFS Servers
@@ -98,7 +140,7 @@ foreach ($server in $adfsServers) {
 foreach ($server in $adfsSortedList) {
     $adfsRole = Check-ADFSHeirarchy $server
     if ($adfsRole.Role -eq "PrimaryComputer") {
-        ADFS-Certificate-Bind $pfxThumbprint
+        ADFS-Certificate-Bind $pfxThumbprint $server
     } Else {
     $remoteDestinationPath = '\\' + "$server" + "\c$\ProgramData\Certify\assets\$adfsHostname\"
     $localPath = "C:\ProgramData\Certify\assets\$adfsHostname\"
@@ -106,4 +148,9 @@ foreach ($server in $adfsSortedList) {
     Certificate-Copy $pfxFile $remoteDestinationPath
     Certificate-Import $server $localPFX
     }
+}
+
+### Restart Service on all ADFS Members
+foreach ($server in $adfsSortedList) {
+    ADFS-Service-Restart $server
 }
