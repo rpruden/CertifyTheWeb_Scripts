@@ -121,6 +121,7 @@ foreach ($server in $wapServers) {
     $localPath = "C:\ProgramData\Certify\assets\$adfsHostname\"
     $localPFX = "$localPath" + "$pfxName"
     Certificate-Copy $pfxFile $remoteDestinationPath
+    Certificate-Import $server $localPFX
     WAP-Certificate-Bind $server $pfxThumbprint
 }
 
